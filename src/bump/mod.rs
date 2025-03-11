@@ -1,9 +1,8 @@
 use std::sync::atomic::AtomicPtr;
 
 pub mod globals;
-pub mod qualloc;
 pub mod utils;
-pub mod qudelloc;
+pub mod allocator;
 
 pub struct BumpMemoryBlockHeader {
     pub size: i32,
