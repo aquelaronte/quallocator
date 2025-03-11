@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicPtr, Ordering};
+
 use super::BumpMemoryBlockHeader;
 use libc::sbrk;
 
@@ -63,4 +65,154 @@ pub fn get_current_heap() -> *mut () {
     unsafe {
         return sbrk(0) as *mut ();
     }
+}
+
+/**
+ * Get the adjacent free blocks of the current block.
+ *
+ * @param current_block The current block of memory.
+ * @param stop_size The size of the block to stop the search for adjacent blocks.
+ * @return A tuple containing first the merged block and then the last scanned block used for optimization
+ *
+ * @note This function is unsafe and should only be called by the bump allocator.
+ *
+ * Two blocks are adjacent if this condition is met:
+ *
+ * pt1 = Block allocated in 00 position of memory
+ * pt2 = block allocated in 20 position of memory
+ *
+ * pt1.size + BumpMemoryBlockHeader::size() == pt2
+ *
+ * Blocks are adjacent because one is allocated next to the other in memory, because memory can be fragmented, if
+ * pt2 is in 23 position of memory and pt1.size + BumpMemoryBlockHeader::size() == 20, then they are not adjacent because
+ * other data is between them
+ *
+ * Example for adjacent blocks:
+ * __________________________
+ * |         pt1           | <-- This can be in position 00 - 19
+ * __________________________
+ * |         pt2           | <-- This can be in position 20 - 39
+ * __________________________
+ *
+ * Example for non-adjacent blocks:
+ * __________________________
+ * |         pt1           | <-- This can be in position 00 - 19
+ * __________________________
+ * |some other data in heap| <-- This can be in position 20 - 25
+ * __________________________
+ * |         pt2           | <-- This can be in position 26 - 45
+ * __________________________
+ *
+ * If this function mets adjacent blocks, then will merge them and return the pointer to a BumpMemoryBlockHeader with the size of
+ * the sum of the sizes of the two blocks.
+ *
+ * Example for merged blocks:
+ * __________________________
+ * |         pt1           | <-- This can be in position 00 - 19
+ * __________________________
+ * |         pt2           | <-- This can be in position 20 - 39
+ * __________________________
+ *
+ * Merged blocks:
+ * __________________________
+ * |         merged        | <-- This can be in position 00 - 39
+ * __________________________
+ *
+ * The size of the merged blocks must be greater or equal than the stop_size, if not, then the function will return None
+ */
+pub fn merge_adjacent_free_blocks(
+    initial_block: *mut BumpMemoryBlockHeader,
+    stop_size: i32,
+) -> (
+    Option<*mut BumpMemoryBlockHeader>,
+    Option<*mut BumpMemoryBlockHeader>,
+) {
+    let mut current_block = initial_block;
+    let mut last_scanned_block: Option<*mut BumpMemoryBlockHeader> = None;
+    let mut acumulated_size = 0;
+
+    unsafe {
+        while (*current_block).is_free {
+            last_scanned_block = Some(current_block);
+
+            let next_block = (*current_block)
+                .next
+                .as_ref()
+                .map(|ptr| ptr.load(Ordering::SeqCst));
+
+            if acumulated_size >= stop_size {
+                break;
+            }
+
+            /*
+             * Check if the next block is free and if it is, then we must check if it is adjacent to the current block
+             */
+            if let Some(next_block) = next_block {
+                let next_block_address = next_block as i32;
+                let current_block_address = current_block as i32;
+                let current_block_size = (*current_block).size;
+
+                if (*next_block).is_free
+                    && (current_block_address + BumpMemoryBlockHeader::size() + current_block_size)
+                        == next_block_address
+                {
+                    acumulated_size += (*current_block).size;
+                    current_block = next_block;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    /*
+     * If the size of the merged blocks is less than the stop size, then return None,
+     * and the second element of the tuple will be the last scanned block because it is useful for allocating for skipping
+     * the blocks that are smaller than the stop size.
+     */
+    if acumulated_size < stop_size {
+        return (None, last_scanned_block);
+    }
+
+    /*
+     * Update the size of the current block and the next pointer.
+     *
+     * The merged blocks next pointer should pointer to the block after the last scanned block.
+     *
+     * Example:
+     * __________________________
+     * |         pt1           | <-- This block is free, can be in position 00 - 19 and points to pt2
+     * __________________________
+     * |         pt2           | <-- This block is free, can be in position 20 - 39 and points to pt3
+     * __________________________
+     * |         pt3           | <-- This block isn't free, can be in position 40 - 59
+     * __________________________
+     *
+     * After merging:
+     * __________________________
+     * |         merged        | <-- This block is free, can be in position 00 - 59 and points to pt3
+     * __________________________
+     * |         pt3           | <-- This block isn't free, can be in position 40 - 59
+     * __________________________
+     *
+     */
+    unsafe {
+        (*initial_block).size = acumulated_size;
+
+        if let Some(last_scanned_block) = last_scanned_block {
+            if let Some(next_block) = (*last_scanned_block)
+                .next
+                .as_ref()
+                .map(|ptr| ptr.load(Ordering::SeqCst))
+            {
+                (*initial_block).next = Some(AtomicPtr::new(next_block));
+            } else {
+                (*initial_block).next = None;
+            }
+        } else {
+            (*initial_block).next = None;
+        }
+    }
+
+    return (Some(initial_block), last_scanned_block);
 }

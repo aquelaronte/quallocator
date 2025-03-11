@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use super::{
     globals::bump_memory,
-    utils::{allocate_block, deallocate_block},
+    utils::{allocate_block, deallocate_block, merge_adjacent_free_blocks},
 };
 
 pub struct BumpAllocator {}
@@ -52,6 +52,18 @@ impl BumpAllocator {
                 }
 
                 if (*node).size < size {
+                    let (merged_block, last_scanned_block) = merge_adjacent_free_blocks(node, size);
+
+                    if let Some(merged_blocks) = merged_block {
+                        current_node = Some(merged_blocks);
+                        continue;
+                    }
+
+                    if let Some(last_scanned_block) = last_scanned_block {
+                        current_node = Some(last_scanned_block);
+                        continue;
+                    }
+
                     current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
                     continue;
                 }
