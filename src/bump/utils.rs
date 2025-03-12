@@ -1,11 +1,10 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use super::BumpMemoryBlockHeader;
+use super::{BumpMemoryBlockHeader, globals::bump_memory};
 use libc::sbrk;
 
-pub fn align_up<T>(size: i32) -> i32 {
-    let system_alignment = align_of::<T>() as i32;
-    (size + (system_alignment - 1)) & !(system_alignment - 1)
+pub fn align_up(size: i32) -> i32 {
+    (size + (8 - 1)) & !(8 - 1)
 }
 
 /**
@@ -21,8 +20,8 @@ pub fn align_up<T>(size: i32) -> i32 {
 pub fn allocate_block<T>(size: i32) -> Option<*mut BumpMemoryBlockHeader> {
     unsafe {
         // Add the size of the header to the size of the block
-        let allocated_size = align_up::<T>(BumpMemoryBlockHeader::size() + size);
-        let aligned_user_data_size = allocated_size - BumpMemoryBlockHeader::size();
+        let aligned_user_data_size = align_up(size);
+        let allocated_size = BumpMemoryBlockHeader::size() + aligned_user_data_size;
 
         println!("Allocated size: {}", allocated_size);
 
@@ -48,7 +47,6 @@ pub fn allocate_block<T>(size: i32) -> Option<*mut BumpMemoryBlockHeader> {
 pub fn deallocate_block(size: i32) {
     unsafe {
         let deallocated_size = BumpMemoryBlockHeader::size() + size;
-        println!("Dellocated size: {}", -deallocated_size);
 
         sbrk(-deallocated_size);
     }
@@ -132,17 +130,21 @@ pub fn merge_adjacent_free_blocks(
     let mut acumulated_size = 0;
 
     unsafe {
+        if (*current_block).is_free {
+            acumulated_size += (*current_block).size;
+        }
+
         while (*current_block).is_free {
             last_scanned_block = Some(current_block);
+
+            if acumulated_size >= stop_size {
+                break;
+            }
 
             let next_block = (*current_block)
                 .next
                 .as_ref()
                 .map(|ptr| ptr.load(Ordering::SeqCst));
-
-            if acumulated_size >= stop_size {
-                break;
-            }
 
             /*
              * Check if the next block is free and if it is, then we must check if it is adjacent to the current block
@@ -152,13 +154,18 @@ pub fn merge_adjacent_free_blocks(
                 let current_block_address = current_block as i32;
                 let current_block_size = (*current_block).size;
 
+                /*
+                 * If block is adjacent, then we must add to acumulated size all the ocupped size
+                 * by the next pointer (header and size attribute)
+                 */
                 if (*next_block).is_free
                     && (current_block_address + BumpMemoryBlockHeader::size() + current_block_size)
                         == next_block_address
                 {
-                    acumulated_size += (*current_block).size;
-                    current_block = next_block;
+                    acumulated_size += (*current_block).size + BumpMemoryBlockHeader::size();
                 }
+
+                current_block = next_block;
             } else {
                 break;
             }
@@ -206,6 +213,7 @@ pub fn merge_adjacent_free_blocks(
                 .map(|ptr| ptr.load(Ordering::SeqCst))
             {
                 (*initial_block).next = Some(AtomicPtr::new(next_block));
+                (*next_block).prev = Some(AtomicPtr::new(initial_block));
             } else {
                 (*initial_block).next = None;
             }
@@ -215,4 +223,29 @@ pub fn merge_adjacent_free_blocks(
     }
 
     return (Some(initial_block), last_scanned_block);
+}
+
+pub fn scan_bump_memory() {
+    unsafe {
+        let memory_guard = bump_memory.lock().unwrap();
+
+        println!("Bump memory scanning results:");
+        if memory_guard.is_none() {
+            println!("Bump memory is empty");
+            return;
+        }
+        let mut current_node = memory_guard.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
+
+        while let Some(node) = current_node {
+            println!(
+                "{:p}:\n\t- size: {} bytes\n\t- free: {}\n",
+                node,
+                (*node).size,
+                (*node).is_free
+            );
+            current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
+        }
+
+        println!("Bump memory end");
+    }
 }

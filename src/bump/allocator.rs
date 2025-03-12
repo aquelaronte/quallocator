@@ -29,9 +29,7 @@ impl BumpAllocator {
             unsafe {
                 let old_break = allocate_block::<T>(size)?;
 
-                if memory_guard.is_none() {
-                    *memory_guard = Some(AtomicPtr::new(old_break));
-                }
+                *memory_guard = Some(AtomicPtr::new(old_break));
 
                 let user_ptr = old_break.add(1);
 
@@ -43,9 +41,11 @@ impl BumpAllocator {
          * If memory is initialized, search for a free block of memory that is large enough to allocate the requested memory
          */
         let mut current_node = memory_guard.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
+        let mut last_node = current_node;
 
         while let Some(node) = current_node {
             unsafe {
+                last_node = Some(node);
                 if !(*node).is_free {
                     current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
                     continue;
@@ -60,8 +60,10 @@ impl BumpAllocator {
                     }
 
                     if let Some(last_scanned_block) = last_scanned_block {
-                        current_node = Some(last_scanned_block);
-                        continue;
+                        if last_scanned_block as i32 != current_node.unwrap() as i32 {
+                            current_node = Some(last_scanned_block);
+                            continue;
+                        }
                     }
 
                     current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
@@ -80,6 +82,13 @@ impl BumpAllocator {
          */
         let old_break = allocate_block::<T>(size)?;
 
+        if let Some(last_node) = last_node {
+            unsafe {
+                (*old_break).prev = Some(AtomicPtr::new(last_node));
+                (*last_node).next = Some(AtomicPtr::new(old_break));
+            }
+        }
+
         unsafe {
             let user_ptr = old_break.add(1);
 
@@ -94,7 +103,7 @@ impl BumpAllocator {
      *
      * @note This function is thread-safe.
      */
-    pub fn qudelloc(usr_data: *const ()) {
+    pub fn qudelloc<T>(usr_data: *const T) {
         let mut memory_guard = bump_memory.lock().unwrap();
 
         /*
@@ -111,7 +120,7 @@ impl BumpAllocator {
          */
         if let Some(node) = current_node {
             unsafe {
-                let usr_data_ptr = node.add(1) as *const ();
+                let usr_data_ptr = node.add(1) as *const T;
 
                 if usr_data_ptr == usr_data {
                     (*node).is_free = true;
@@ -133,7 +142,7 @@ impl BumpAllocator {
 
         while let Some(node) = current_node {
             unsafe {
-                let usr_data_ptr = node.add(1) as *const ();
+                let usr_data_ptr = node.add(1) as *const T;
 
                 if usr_data_ptr != usr_data {
                     current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
@@ -150,7 +159,10 @@ impl BumpAllocator {
                     }
 
                     deallocate_block((*node).size);
+                    return;
                 }
+
+                current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
             }
         }
     }
