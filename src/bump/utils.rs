@@ -1,11 +1,9 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use crate::utils::align_up;
+
 use super::{BumpMemoryBlockHeader, globals::bump_memory};
 use libc::sbrk;
-
-pub fn align_up(size: i32) -> i32 {
-    (size + (8 - 1)) & !(8 - 1)
-}
 
 /**
  * Allocate a new block of memory for the bump allocator and set the header
@@ -23,8 +21,7 @@ pub fn allocate_block<T>(size: i32) -> Option<*mut BumpMemoryBlockHeader> {
         let aligned_user_data_size = align_up(size);
         let allocated_size = BumpMemoryBlockHeader::size() + aligned_user_data_size;
 
-        println!("Allocated size: {}", allocated_size);
-
+        // Increase the heap size
         let old_break = sbrk(allocated_size) as *mut BumpMemoryBlockHeader;
 
         if old_break.is_null() {
@@ -32,9 +29,15 @@ pub fn allocate_block<T>(size: i32) -> Option<*mut BumpMemoryBlockHeader> {
         }
 
         *old_break = BumpMemoryBlockHeader::new(aligned_user_data_size, false, None, None);
-
         Some(old_break)
     }
+}
+
+/**
+ * Gets pointer for user by a given header pointer
+ */
+pub fn get_usr_pointer<T>(header: *const BumpMemoryBlockHeader) -> *mut T {
+    (header as i32 - BumpMemoryBlockHeader::size()) as *mut T
 }
 
 /**
@@ -197,7 +200,7 @@ pub fn merge_adjacent_free_blocks(
      *
      * After merging:
      * __________________________
-     * |         merged        | <-- This block is free, can be in position 00 - 59 and points to pt3
+     * |         merged        | <-- This block is free, can be in position 00 - 39 and points to pt3
      * __________________________
      * |         pt3           | <-- This block isn't free, can be in position 40 - 59
      * __________________________
@@ -225,6 +228,13 @@ pub fn merge_adjacent_free_blocks(
     return (Some(initial_block), last_scanned_block);
 }
 
+/**
+ * Prints in console all the items into bump_memory in the following format
+ *
+ * <head address>:
+ *  - size: <pointer size>
+ *  - free: <is pointer free>
+ */
 pub fn scan_bump_memory() {
     unsafe {
         let memory_guard = bump_memory.lock().unwrap();

@@ -46,11 +46,19 @@ impl BumpAllocator {
         while let Some(node) = current_node {
             unsafe {
                 last_node = Some(node);
+
+                /*
+                 * If this node isn't free, then we must continue
+                 */
                 if !(*node).is_free {
                     current_node = (*node).next.as_ref().map(|ptr| ptr.load(Ordering::SeqCst));
                     continue;
                 }
 
+                /*
+                 * If this node is free but it has small space, then we must
+                 * look for free adjacent blocks for merging
+                 */
                 if (*node).size < size {
                     let (merged_block, last_scanned_block) = merge_adjacent_free_blocks(node, size);
 
@@ -59,7 +67,12 @@ impl BumpAllocator {
                         continue;
                     }
 
+                    /*
+                     * If merged blocks was unsucessful, then we must continue iteration skipping all blocks
+                     * that was already iterated by merge_adjacent_free_blocks
+                     */
                     if let Some(last_scanned_block) = last_scanned_block {
+                        // Sometimes merge_adjacent_free_blocks returns the same block, so we must ensure that given block isn't the current
                         if last_scanned_block as i32 != current_node.unwrap() as i32 {
                             current_node = Some(last_scanned_block);
                             continue;
@@ -70,6 +83,10 @@ impl BumpAllocator {
                     continue;
                 }
 
+                /*
+                 * If node with enough space is found, then we must set false the pointer freedom
+                 * and return to the user the pointer
+                 */
                 (*node).is_free = false;
                 let user_ptr = node.add(1);
 
@@ -82,6 +99,10 @@ impl BumpAllocator {
          */
         let old_break = allocate_block::<T>(size)?;
 
+        /*
+         * Make new BumpMemoryBlockHeader to point the last_node as the previous
+         * and last_node to point to the newly allocated block
+         */
         if let Some(last_node) = last_node {
             unsafe {
                 (*old_break).prev = Some(AtomicPtr::new(last_node));
@@ -142,6 +163,10 @@ impl BumpAllocator {
 
         while let Some(node) = current_node {
             unsafe {
+                /*
+                 * If we found node in list, then we must set it to be free, otherwise, we must
+                 * continue iterations on next node
+                 */
                 let usr_data_ptr = node.add(1) as *const T;
 
                 if usr_data_ptr != usr_data {
@@ -151,6 +176,9 @@ impl BumpAllocator {
 
                 (*node).is_free = true;
 
+                /*
+                 * If this is already the last node, we must give to Operative System the memory of the block
+                 */
                 if (*node).next.is_none() {
                     if let Some(prev_ptr) = &(*node).prev {
                         let prev = prev_ptr.load(Ordering::SeqCst);

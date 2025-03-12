@@ -1,7 +1,10 @@
-use crate::bump::{
-    BumpMemoryBlockHeader,
-    allocator::BumpAllocator,
-    utils::{align_up, get_current_heap, scan_bump_memory},
+use crate::{
+    bump::{
+        BumpMemoryBlockHeader,
+        allocator::BumpAllocator,
+        utils::{get_current_heap, scan_bump_memory},
+    },
+    utils::align_up,
 };
 use libc::sbrk;
 
