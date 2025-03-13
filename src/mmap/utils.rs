@@ -82,11 +82,18 @@ pub fn deallocate_region(region: *mut MmapMemoryRegion) {
     }
 }
 
+/**
+ * Gets a region and puts a section of memory inside it
+ */
 pub fn place_section_inside_region(
     region: *mut MmapMemoryRegion,
     size: usize,
 ) -> Option<*mut MmapMemorySectionHeader> {
     unsafe {
+        /*
+         * If regions doesn't have enough space to store the section of memory, then
+         * we must return None
+         */
         if (*region).space_available < size {
             return None;
         }
@@ -98,7 +105,11 @@ pub fn place_section_inside_region(
             .as_ref()
             .map(|ptr| ptr.load(Ordering::SeqCst));
 
+        /*
+         * In the case where region head_section isn't initialized, we must initialize it
+         */
         if current_section.is_none() {
+            // Gets the direction on memory just after the Region header
             let section_addr =
                 (region as usize + MmapMemoryRegion::size()) as *mut MmapMemorySectionHeader;
 
@@ -109,6 +120,11 @@ pub fn place_section_inside_region(
             return Some(section_addr);
         }
 
+
+        /*
+         * If region is already initialized, then we must iterate over every child until we found
+         * a section that is free and haves enough space for storing user data
+         */
         while let Some(section) = current_section {
             if !(*section).is_free {
                 current_section = section
@@ -120,6 +136,10 @@ pub fn place_section_inside_region(
                 continue;
             }
 
+            /*
+             * TODO: to implement a function for merging free adjacent sections, see more information
+             * about merging adjacent space into [`super::bump::utils::merge_adjacent_free_blocks`]
+             */
             if (*section).size < size {
                 current_section = section
                     .as_ref()
@@ -130,11 +150,51 @@ pub fn place_section_inside_region(
                 continue;
             }
 
+            /*
+             * If free section with enough space is found, then we must set free to false and rest
+             * the section space to the space_available plus SectionHeader
+             */
             (*section).is_free = false;
-            (*region).space_available -= (*section).size;
+
+            /*
+             * At the moment of rest the space available, we must take in count the header size because
+             * when we are deallocating space, we rest also the header space because it can be useful when 
+             * we are merging adjacent blocks
+             */
+            (*region).space_available -= (*section).size + MmapMemorySectionHeader::size();
 
             return Some(section);
         }
+
+        /*
+         * If free blocks aren't found, then we must take the last section of the region and calculate this
+         * 
+         * First, we need to calculate the range of memory that a region haves
+         * 
+         * fr = first direction of memory that a region haves
+         * lr = last direction of memory that a region haves
+         * r = region pointer
+         * 
+         * fr = region
+         * lr = fr + r.total_space + RegionHeader.size
+         * 
+         * Next, we need to check that if we place a section with the needed size by the user after the last section
+         * of a region, it doesn't becomes greater than lr
+         * 
+         * For example: if the range of memory that a region haves is from 0x00 to 0xc0, and the last section is in 0xb0,
+         * we must check that if we place a section with the given size after the last section, that user section doesn't
+         * haves more size than the region range
+         * 
+         * s = size needed for the user
+         * ls = last section of region
+         * us = direction of memory where we are going to place the user section
+         * 
+         * us = ls + ls.size + SectionHeader.size
+         * 
+         * us + SectionHeader.size + s <= lr
+         * 
+         * If this condition is met, then we can place the user section just after the last section of region
+         */
 
         None
     }
