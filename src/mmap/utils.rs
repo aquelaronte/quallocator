@@ -8,7 +8,7 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
-use super::{MmapMemoryBlockHeader, MmapMemoryRegion};
+use super::{MmapMemoryRegion, MmapMemorySectionHeader};
 
 /**
  * Takes page size from the OS
@@ -53,9 +53,16 @@ pub fn allocate_region(size: usize) -> Option<*mut MmapMemoryRegion> {
         return None;
     }
 
-    unsafe {
-        *addr = MmapMemoryRegion::new(block_size - MmapMemoryRegion::size(), None, None, None)
-    }
+    let stored_size = block_size - MmapMemorySectionHeader::size();
+
+    /*
+     * In region size we are going to store the memory block size minus Header Region size
+     *
+     * That means that if we have 1024 bytes of size in given block by mmap, then Region Header will store
+     * in size attribute the value of that 1024 bytes minus the Region Header, so if Region Header weight
+     * is about 30 bytes, then the region size attribute must mark 994 bytes of free space
+     */
+    unsafe { *addr = MmapMemoryRegion::new(stored_size, stored_size, None, None, None) }
 
     return Some(addr);
 }
@@ -65,81 +72,70 @@ pub fn allocate_region(size: usize) -> Option<*mut MmapMemoryRegion> {
  */
 pub fn deallocate_region(region: *mut MmapMemoryRegion) {
     unsafe {
-        munmap(region as *mut _, (*region).size + MmapMemoryRegion::size());
+        /*
+         * Region.total_space contains the block size without the region size itself
+         */
+        munmap(
+            region as *mut _,
+            (*region).total_space + MmapMemoryRegion::size(),
+        );
     }
 }
 
-/**
- * Takes a header and returns the last header from the linked list
- */
-pub fn take_last_block(block: *mut MmapMemoryBlockHeader) -> *mut MmapMemoryBlockHeader {
-    let mut current_block = block;
-
-    unsafe {
-        while (*current_block).next.is_some() {
-            current_block = (*current_block)
-                .next
-                .as_mut()
-                .unwrap()
-                .load(Ordering::SeqCst);
-        }
-    }
-
-    current_block
-}
-
-/**
- * Place a block inside a region
- */
-pub fn place_block(
+pub fn place_section_inside_region(
     region: *mut MmapMemoryRegion,
     size: usize,
-) -> Option<*mut MmapMemoryBlockHeader> {
+) -> Option<*mut MmapMemorySectionHeader> {
     unsafe {
-        let real_size = size + MmapMemoryBlockHeader::size();
-
-        /*
-         * If region doesn't have enough space for store a new block, then it will return None
-         */
-        if (*region).size < real_size {
+        if (*region).space_available < size {
             return None;
         }
 
-        /*
-         * If region already has a head_block, then we must get the final node from the linked list and create an empty new Header
-         * next to the last node and rest the node real_size on the region size
-         */
-        if let Some(head_block) = region.as_mut().unwrap().head_block.as_mut() {
-            let head_block_ptr = head_block.load(Ordering::SeqCst);
+        let mut current_section = region
+            .as_ref()
+            .unwrap()
+            .head_section
+            .as_ref()
+            .map(|ptr| ptr.load(Ordering::SeqCst));
 
-            let last_block = take_last_block(head_block_ptr);
+        if current_section.is_none() {
+            let section_addr =
+                (region as usize + MmapMemoryRegion::size()) as *mut MmapMemorySectionHeader;
 
-            /*
-             * Gets the pointer next to the last_block
-             */
-            let block_pointer =
-                (last_block.add(1) as usize + (*last_block).size) as *mut MmapMemoryBlockHeader;
+            (*section_addr) = MmapMemorySectionHeader::new(size, false, None, None);
+            (*region).head_section = Some(AtomicPtr::new(section_addr));
+            (*region).space_available -= (*section_addr).size + MmapMemorySectionHeader::size();
 
-            (*block_pointer) =
-                MmapMemoryBlockHeader::new(size, false, None, Some(AtomicPtr::new(last_block)));
-
-            (*region).size -= real_size;
-
-            return Some(block_pointer);
+            return Some(section_addr);
         }
 
-        /*
-         * Gets the pointer next to the region header
-         */
-        let head_block = ((*region).size + MmapMemoryRegion::size()) as *mut MmapMemoryBlockHeader;
+        while let Some(section) = current_section {
+            if !(*section).is_free {
+                current_section = section
+                    .as_ref()
+                    .unwrap()
+                    .next
+                    .as_ref()
+                    .map(|ptr| ptr.load(Ordering::SeqCst));
+                continue;
+            }
 
-        *head_block = MmapMemoryBlockHeader::new(size, false, None, None);
+            if (*section).size < size {
+                current_section = section
+                    .as_ref()
+                    .unwrap()
+                    .next
+                    .as_ref()
+                    .map(|ptr| ptr.load(Ordering::SeqCst));
+                continue;
+            }
 
-        // Links the head_block attribute to the newly created block
-        (*region).head_block = Some(AtomicPtr::new(head_block));
+            (*section).is_free = false;
+            (*region).space_available -= (*section).size;
 
-        (*region).size -= real_size;
+            return Some(section);
+        }
 
-        Some(head_block)
+        None
     }
 }

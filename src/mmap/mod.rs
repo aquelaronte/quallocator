@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicPtr;
 
 pub mod globals;
 pub mod utils;
+pub mod allocator;
 
 /**
  * Mmap memory allocator is the modern way to make a memory allocator, it uses mmap and unmap
@@ -85,22 +86,25 @@ pub mod utils;
  * Regions are a linked list between them, and memory splits are also a linked list between them
  */
 pub struct MmapMemoryRegion {
-    pub size: usize,
-    pub head_block: Option<AtomicPtr<MmapMemoryBlockHeader>>,
+    pub space_available: usize,
+    pub total_space: usize,
+    pub head_section: Option<AtomicPtr<MmapMemorySectionHeader>>,
     pub next: Option<AtomicPtr<MmapMemoryRegion>>,
     pub prev: Option<AtomicPtr<MmapMemoryRegion>>,
 }
 
 impl MmapMemoryRegion {
     pub fn new(
-        size: usize,
-        head_block: Option<AtomicPtr<MmapMemoryBlockHeader>>,
+        space_available: usize,
+        total_space: usize,
+        head_section: Option<AtomicPtr<MmapMemorySectionHeader>>,
         next: Option<AtomicPtr<MmapMemoryRegion>>,
         prev: Option<AtomicPtr<MmapMemoryRegion>>,
     ) -> Self {
         Self {
-            size,
-            head_block,
+            space_available,
+            total_space,
+            head_section,
             next,
             prev,
         }
@@ -111,19 +115,19 @@ impl MmapMemoryRegion {
     }
 }
 
-pub struct MmapMemoryBlockHeader {
+pub struct MmapMemorySectionHeader {
     pub size: usize,
     pub is_free: bool,
-    pub next: Option<AtomicPtr<MmapMemoryBlockHeader>>,
-    pub prev: Option<AtomicPtr<MmapMemoryBlockHeader>>,
+    pub next: Option<AtomicPtr<MmapMemorySectionHeader>>,
+    pub prev: Option<AtomicPtr<MmapMemorySectionHeader>>,
 }
 
-impl MmapMemoryBlockHeader {
+impl MmapMemorySectionHeader {
     pub fn new(
         size: usize,
         is_free: bool,
-        next: Option<AtomicPtr<MmapMemoryBlockHeader>>,
-        prev: Option<AtomicPtr<MmapMemoryBlockHeader>>,
+        next: Option<AtomicPtr<MmapMemorySectionHeader>>,
+        prev: Option<AtomicPtr<MmapMemorySectionHeader>>,
     ) -> Self {
         Self {
             size,
